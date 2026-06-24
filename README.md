@@ -55,16 +55,21 @@ HubSpot__AccessToken=pat-na1-...
 
 Create these in HubSpot before enabling (Settings → Properties → Contacts):
 
-| Property name | Type |
-|---|---|
-| `stripe_customer_id` | Single-line text |
-| `internal_customer_id` | Single-line text |
-| `subscription_tier` | Single-line text |
-| `subscription_status` | Single-line text |
-| `trial_start_date` | Date |
-| `trial_end_date` | Date |
-| `card_exp_month` | Single-line text |
-| `card_exp_year` | Single-line text |
+| Property name | Type | Notes |
+|---|---|---|
+| `stripe_customer_id` | Single-line text | **Mark as unique identifier** — contacts are keyed on this |
+| `login_identity` | Single-line text | OAuth login email/username (set by nightly sweep, not this service) |
+| `internal_customer_id` | Single-line text | |
+| `subscription_tier` | Single-line text | |
+| `subscription_status` | Single-line text | |
+| `trial_start_date` | Date | |
+| `trial_end_date` | Date | |
+| `card_exp_month` | Single-line text | |
+| `card_exp_year` | Single-line text | |
+
+To mark `stripe_customer_id` as a unique identifier: edit the property → toggle
+"Used as a unique ID for contacts". Without this, the API will reject upsert requests
+that use `stripe_customer_id` as the `idProperty`.
 
 ## Deployment
 

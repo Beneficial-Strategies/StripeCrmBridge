@@ -1,0 +1,135 @@
+# CI/CD Pipeline for Stripe CRM Bridge
+#
+# Triggers:
+#   push to main     → build + deploy to STAGING  (stripe-crm-bridge-staging)
+#   push tag v*.*.*  → build + deploy to PRODUCTION (stripe-crm-bridge)
+#
+# Required GitHub secrets (repo-level):
+#   GCP_PROJECT_ID                  — GCP project ID ("iso20022-mcp-prod")
+#   GCP_WORKLOAD_IDENTITY_PROVIDER  — WIF provider resource name
+#   GCP_SERVICE_ACCOUNT             — service account email the workflow impersonates
+#
+# Secrets in Google Secret Manager:
+#   Production:
+#     stripe-crm-secret-key          — sk_live_... (used only for customer lookups)
+#     stripe-crm-webhook-secret      — whsec_... (signing secret for this endpoint)
+#     hubspot-access-token           — pat-na1-... (HubSpot Private App token)
+#
+#   Staging:
+#     stripe-crm-secret-key-staging  — sk_test_...
+#     stripe-crm-webhook-secret-staging — whsec_... (test webhook signing secret)
+#     hubspot-access-token           — same HubSpot account used for both environments
+
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+env:
+  REGION: us-central1
+  REGISTRY: us-central1-docker.pkg.dev
+  IMAGE_NAME: stripe-crm-bridge
+
+jobs:
+  build-and-deploy:
+    name: Build, Test, Deploy
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set environment-specific variables
+        id: envvars
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "service_name=stripe-crm-bridge" >> "$GITHUB_OUTPUT"
+            echo "stripe_secrets=Stripe__SecretKey=stripe-crm-secret-key:latest,Stripe__WebhookSecret=stripe-crm-webhook-secret:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "service_name=stripe-crm-bridge-staging" >> "$GITHUB_OUTPUT"
+            echo "stripe_secrets=Stripe__SecretKey=stripe-crm-secret-key-staging:latest,Stripe__WebhookSecret=stripe-crm-webhook-secret-staging:latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set image tag
+        id: tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="main-${GITHUB_SHA::8}"
+          fi
+          IMAGE="${REGISTRY}/${{ secrets.GCP_PROJECT_ID }}/${IMAGE_NAME}/${IMAGE_NAME}:${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag "${{ steps.tag.outputs.image }}" \
+            --tag "${REGISTRY}/${{ secrets.GCP_PROJECT_ID }}/${IMAGE_NAME}/${IMAGE_NAME}:latest" \
+            .
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGISTRY}" --quiet
+
+      - name: Push image
+        run: |
+          docker push "${{ steps.tag.outputs.image }}"
+          docker push "${REGISTRY}/${{ secrets.GCP_PROJECT_ID }}/${IMAGE_NAME}/${IMAGE_NAME}:latest"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${{ steps.envvars.outputs.service_name }}" \
+            --image "${{ steps.tag.outputs.image }}" \
+            --region "${REGION}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --memory 256Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 3 \
+            --timeout 60 \
+            --concurrency 80 \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --set-secrets "${{ steps.envvars.outputs.stripe_secrets }},HubSpot__AccessToken=hubspot-access-token:latest" \
+            --set-env-vars "HubSpot__Enabled=true,DEPLOY_SHA=${{ github.sha }}"
+
+      - name: Verify deployment
+        run: |
+          SERVICE_URL=$(gcloud run services describe "${{ steps.envvars.outputs.service_name }}" \
+            --region "${REGION}" \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --format "value(status.url)")
+
+          echo "Service URL: ${SERVICE_URL}"
+
+          for i in $(seq 1 6); do
+            if curl -sf "${SERVICE_URL}/health" > /dev/null 2>&1; then
+              echo "Health check passed: ${SERVICE_URL}"
+              exit 0
+            fi
+            echo "  attempt ${i}/6 — waiting 10s..."
+            sleep 10
+          done
+
+          echo "Health check failed after deployment"
+          exit 1

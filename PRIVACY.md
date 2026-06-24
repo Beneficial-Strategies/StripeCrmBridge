@@ -27,13 +27,14 @@ Stripe delivers signed webhook event payloads to this service. Each payload may 
 
 ## Data forwarded to HubSpot
 
-The following fields are upserted to the HubSpot Contacts API, keyed on email address:
+The following fields are upserted to the HubSpot Contacts API, keyed on `stripe_customer_id`
+(not email — the Stripe Customer ID is the stable, immutable identifier):
 
 | HubSpot field | Source | Purpose |
 |---|---|---|
-| `email` | Stripe Customer | Contact identity key |
+| `stripe_customer_id` | Stripe Customer ID | **Contact identity key** — immutable |
+| `email` | Stripe Customer email | Correspondence address for outbound sequences |
 | `firstname` | Stripe Customer name | Display in CRM |
-| `stripe_customer_id` | Stripe Customer ID | Link CRM record to billing |
 | `internal_customer_id` | Stripe Customer metadata | Link CRM record to app DB |
 | `subscription_tier` | Stripe Price metadata | Segment by plan |
 | `subscription_status` | Stripe Subscription status | Lifecycle stage |
@@ -41,6 +42,10 @@ The following fields are upserted to the HubSpot Contacts API, keyed on email ad
 | `trial_end_date` | Stripe Subscription | Trial expiry / nurture trigger |
 | `card_exp_month` | Stripe Card | Card expiry email |
 | `card_exp_year` | Stripe Card | Card expiry email |
+
+The `login_identity` field (OAuth login email/username) is populated by the application's
+nightly sweep, not by this service, because this service has no access to the application
+database.
 
 ## Data NOT forwarded
 

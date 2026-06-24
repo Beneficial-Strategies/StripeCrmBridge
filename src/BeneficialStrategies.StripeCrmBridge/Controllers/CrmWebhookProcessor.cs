@@ -66,11 +66,13 @@ public class CrmWebhookProcessor(
         var tier = session.Metadata?.GetValueOrDefault("tier") ?? "pro";
         var internalUserId = session.Metadata?.GetValueOrDefault("userId");
         var isTrialing = session.Metadata?.GetValueOrDefault("trial") == "true";
+        var billingEmail = session.CustomerEmail ?? await GetCustomerEmailAsync(session.CustomerId);
 
         var contact = new ContactSyncData(
-            Email: session.CustomerEmail ?? await GetCustomerEmailAsync(session.CustomerId),
-            DisplayName: session.CustomerDetails?.Name,
             StripeCustomerId: session.CustomerId,
+            BillingEmail: billingEmail,
+            LoginIdentity: null,
+            DisplayName: session.CustomerDetails?.Name,
             InternalUserId: internalUserId,
             SubscriptionTier: tier,
             SubscriptionStatus: isTrialing ? "trialing" : "active",
@@ -88,16 +90,13 @@ public class CrmWebhookProcessor(
         var sub = stripeEvent.Data.Object as StripeSubscription;
         if (sub == null) return;
 
-        var tier = GetTierFromSubscription(sub);
-        var email = await GetCustomerEmailAsync(sub.CustomerId);
-        if (email == null) return;
-
         var contact = new ContactSyncData(
-            Email: email,
-            DisplayName: null,
             StripeCustomerId: sub.CustomerId,
+            BillingEmail: await GetCustomerEmailAsync(sub.CustomerId),
+            LoginIdentity: null,
+            DisplayName: null,
             InternalUserId: null,
-            SubscriptionTier: tier,
+            SubscriptionTier: GetTierFromSubscription(sub),
             SubscriptionStatus: sub.Status,
             TrialStartDate: sub.TrialStart,
             TrialEndDate: sub.TrialEnd,
@@ -113,13 +112,11 @@ public class CrmWebhookProcessor(
         var sub = stripeEvent.Data.Object as StripeSubscription;
         if (sub == null) return;
 
-        var email = await GetCustomerEmailAsync(sub.CustomerId);
-        if (email == null) return;
-
         var contact = new ContactSyncData(
-            Email: email,
-            DisplayName: null,
             StripeCustomerId: sub.CustomerId,
+            BillingEmail: await GetCustomerEmailAsync(sub.CustomerId),
+            LoginIdentity: null,
+            DisplayName: null,
             InternalUserId: null,
             SubscriptionTier: "free",
             SubscriptionStatus: "canceled",
@@ -141,13 +138,11 @@ public class CrmWebhookProcessor(
         var sub = stripeEvent.Data.Object as StripeSubscription;
         if (sub == null) return;
 
-        var email = await GetCustomerEmailAsync(sub.CustomerId);
-        if (email == null) return;
-
         var contact = new ContactSyncData(
-            Email: email,
-            DisplayName: null,
             StripeCustomerId: sub.CustomerId,
+            BillingEmail: await GetCustomerEmailAsync(sub.CustomerId),
+            LoginIdentity: null,
+            DisplayName: null,
             InternalUserId: null,
             SubscriptionTier: null,
             SubscriptionStatus: "trial_ending",
@@ -167,13 +162,11 @@ public class CrmWebhookProcessor(
         var invoice = stripeEvent.Data.Object as StripeInvoice;
         if (invoice == null || invoice.BillingReason != "subscription_cycle") return;
 
-        var email = invoice.CustomerEmail ?? await GetCustomerEmailAsync(invoice.CustomerId);
-        if (email == null) return;
-
         var contact = new ContactSyncData(
-            Email: email,
-            DisplayName: null,
             StripeCustomerId: invoice.CustomerId,
+            BillingEmail: invoice.CustomerEmail ?? await GetCustomerEmailAsync(invoice.CustomerId),
+            LoginIdentity: null,
+            DisplayName: null,
             InternalUserId: null,
             SubscriptionTier: null,
             SubscriptionStatus: "active",
@@ -192,13 +185,12 @@ public class CrmWebhookProcessor(
         if (invoice == null || invoice.BillingReason == "subscription_create") return;
 
         var isFinal = invoice.NextPaymentAttempt == null;
-        var email = invoice.CustomerEmail ?? await GetCustomerEmailAsync(invoice.CustomerId);
-        if (email == null) return;
 
         var contact = new ContactSyncData(
-            Email: email,
-            DisplayName: null,
             StripeCustomerId: invoice.CustomerId,
+            BillingEmail: invoice.CustomerEmail ?? await GetCustomerEmailAsync(invoice.CustomerId),
+            LoginIdentity: null,
+            DisplayName: null,
             InternalUserId: null,
             SubscriptionTier: null,
             SubscriptionStatus: isFinal ? "canceled" : "past_due",
@@ -218,16 +210,17 @@ public class CrmWebhookProcessor(
     private async Task HandleCustomerUpdated(Event stripeEvent)
     {
         var customer = stripeEvent.Data.Object as StripeCustomer;
-        if (customer?.Email == null) return;
+        if (customer == null) return;
 
         // DefaultSource is a Card when the customer has a saved card
         var card = customer.DefaultSource as Card
                    ?? (customer.Sources?.Data?.OfType<Card>().FirstOrDefault());
 
         var contact = new ContactSyncData(
-            Email: customer.Email,
-            DisplayName: customer.Name,
             StripeCustomerId: customer.Id,
+            BillingEmail: customer.Email,
+            LoginIdentity: null,
+            DisplayName: customer.Name,
             InternalUserId: customer.Metadata?.GetValueOrDefault("userId"),
             SubscriptionTier: null,
             SubscriptionStatus: null,
@@ -250,7 +243,7 @@ public class CrmWebhookProcessor(
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "HubSpot sync failed for {Email}", contact.Email);
+            logger.LogWarning(ex, "HubSpot sync failed for {StripeCustomerId}", contact.StripeCustomerId);
         }
     }
 

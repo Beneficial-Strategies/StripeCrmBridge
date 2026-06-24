@@ -7,8 +7,12 @@ namespace BeneficialStrategies.StripeCrmBridge.HubSpot;
 
 /// <summary>
 /// HubSpot CRM integration via the Contacts v3 batch-upsert API.
-/// Contacts are keyed on email — existing contacts are updated, new emails create contacts.
-/// All custom properties must be defined in HubSpot before the first sync.
+/// <para>
+/// Contacts are keyed on <c>stripe_customer_id</c> — that property must be configured
+/// as a unique identifier in HubSpot (Settings → Properties → Contacts →
+/// stripe_customer_id → check "Used as a unique ID"). All other custom properties must
+/// also be defined before the first sync.
+/// </para>
 /// </summary>
 public sealed class HubSpotService : IHubSpotService
 {
@@ -61,8 +65,8 @@ public sealed class HubSpotService : IHubSpotService
         {
             inputs = contacts.Select(c => new
             {
-                idProperty = "email",
-                id = c.Email,
+                idProperty = "stripe_customer_id",
+                id = c.StripeCustomerId,
                 properties = BuildProperties(c)
             })
         };
@@ -94,13 +98,12 @@ public sealed class HubSpotService : IHubSpotService
 
     private static Dictionary<string, string?> BuildProperties(ContactSyncData c)
     {
-        var props = new Dictionary<string, string?>
-        {
-            ["email"] = c.Email,
-            ["firstname"] = c.DisplayName,
-            ["stripe_customer_id"] = c.StripeCustomerId,
-        };
+        var props = new Dictionary<string, string?>();
 
+        // billing_email → HubSpot "email" field (correspondence/outbound address)
+        if (c.BillingEmail != null)        props["email"] = c.BillingEmail;
+        if (c.LoginIdentity != null)       props["login_identity"] = c.LoginIdentity;
+        if (c.DisplayName != null)         props["firstname"] = c.DisplayName;
         if (c.InternalUserId != null)      props["internal_customer_id"] = c.InternalUserId;
         if (c.SubscriptionTier != null)    props["subscription_tier"] = c.SubscriptionTier.ToLowerInvariant();
         if (c.SubscriptionStatus != null)  props["subscription_status"] = c.SubscriptionStatus.ToLowerInvariant();
