@@ -112,7 +112,10 @@ public sealed class HubSpotService : IHubSpotService
         // A VALIDATION_ERROR on the email property means the billing email is already
         // assigned to a different HubSpot contact. Return these contacts for a retry
         // without the email field so the remaining properties still sync.
-        if (withEmail && body.Contains("VALIDATION_ERROR") && body.Contains("\"email\""))
+        // HubSpot error formats vary: batch errors say "propertyName=email" while
+        // single-property errors say "\"email\"" — match either form.
+        if (withEmail && body.Contains("VALIDATION_ERROR") &&
+            (body.Contains("propertyName=email") || body.Contains("\"email\"")))
             return contacts;
 
         _logger.LogWarning("HubSpot batch upsert {StatusCode}: {Body}", (int)response.StatusCode, body);
