@@ -31,6 +31,9 @@ public class CrmWebhookProcessor(
             case EventTypes.CheckoutSessionCompleted:
                 await HandleCheckoutSessionCompleted(stripeEvent);
                 break;
+            case EventTypes.CustomerSubscriptionCreated:
+                await HandleSubscriptionCreated(stripeEvent);
+                break;
             case EventTypes.CustomerSubscriptionUpdated:
                 await HandleSubscriptionUpdated(stripeEvent);
                 break;
@@ -45,6 +48,9 @@ public class CrmWebhookProcessor(
                 break;
             case EventTypes.InvoicePaymentFailed:
                 await HandleInvoicePaymentFailed(stripeEvent);
+                break;
+            case EventTypes.CustomerCreated:
+                await HandleCustomerCreated(stripeEvent);
                 break;
             case EventTypes.CustomerUpdated:
                 await HandleCustomerUpdated(stripeEvent);
@@ -78,6 +84,28 @@ public class CrmWebhookProcessor(
             SubscriptionStatus: isTrialing ? "trialing" : "active",
             TrialStartDate: isTrialing ? DateTime.UtcNow : null,
             TrialEndDate: null,
+            CardLastFour: null,
+            CardExpMonth: null,
+            CardExpYear: null);
+
+        await SyncAsync(contact);
+    }
+
+    private async Task HandleSubscriptionCreated(Event stripeEvent)
+    {
+        var sub = stripeEvent.Data.Object as StripeSubscription;
+        if (sub == null) return;
+
+        var contact = new ContactSyncData(
+            StripeCustomerId: sub.CustomerId,
+            BillingEmail: await GetCustomerEmailAsync(sub.CustomerId),
+            LoginIdentity: null,
+            DisplayName: null,
+            InternalUserId: sub.Metadata?.GetValueOrDefault("userId"),
+            SubscriptionTier: GetTierFromSubscription(sub),
+            SubscriptionStatus: sub.Status,
+            TrialStartDate: sub.TrialStart,
+            TrialEndDate: sub.TrialEnd,
             CardLastFour: null,
             CardExpMonth: null,
             CardExpYear: null);
@@ -194,6 +222,32 @@ public class CrmWebhookProcessor(
             InternalUserId: null,
             SubscriptionTier: null,
             SubscriptionStatus: isFinal ? "canceled" : "past_due",
+            TrialStartDate: null,
+            TrialEndDate: null,
+            CardLastFour: null,
+            CardExpMonth: null,
+            CardExpYear: null);
+
+        await SyncAsync(contact);
+    }
+
+    /// <summary>
+    /// Fires when a new Stripe Customer is created — the moment a user signs up,
+    /// before any subscription or payment exists. Creates the initial HubSpot contact.
+    /// </summary>
+    private async Task HandleCustomerCreated(Event stripeEvent)
+    {
+        var customer = stripeEvent.Data.Object as StripeCustomer;
+        if (customer == null) return;
+
+        var contact = new ContactSyncData(
+            StripeCustomerId: customer.Id,
+            BillingEmail: customer.Email,
+            LoginIdentity: null,
+            DisplayName: customer.Name,
+            InternalUserId: customer.Metadata?.GetValueOrDefault("userId"),
+            SubscriptionTier: null,
+            SubscriptionStatus: null,
             TrialStartDate: null,
             TrialEndDate: null,
             CardLastFour: null,
