@@ -61,13 +61,29 @@ public sealed class HubSpotService : IHubSpotService
 
     private async Task UpsertBatchAsync(ContactSyncData[] contacts, CancellationToken ct)
     {
+        var failed = await PostBatchAsync(contacts, withEmail: true, ct);
+        if (failed.Length == 0) return;
+
+        // Retry contacts whose email conflicted with an existing contact, this time
+        // omitting the email field so the rest of the properties (tier, status, etc.)
+        // still land. The existing email on the HubSpot contact is left unchanged.
+        _logger.LogWarning(
+            "HubSpot email conflict on {Count} contact(s) — retrying without email field: {Ids}",
+            failed.Length,
+            string.Join(", ", failed.Select(c => c.StripeCustomerId)));
+
+        await PostBatchAsync(failed, withEmail: false, ct);
+    }
+
+    private async Task<ContactSyncData[]> PostBatchAsync(ContactSyncData[] contacts, bool withEmail, CancellationToken ct)
+    {
         var payload = new
         {
             inputs = contacts.Select(c => new
             {
                 idProperty = "stripe_customer_id",
                 id = c.StripeCustomerId,
-                properties = BuildProperties(c)
+                properties = BuildProperties(c, includeEmail: withEmail)
             })
         };
 
@@ -82,26 +98,33 @@ public sealed class HubSpotService : IHubSpotService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "HubSpot API unreachable");
-            return;
+            return [];
         }
 
-        if (!response.IsSuccessStatusCode)
+        if (response.IsSuccessStatusCode)
         {
-            var body = await response.Content.ReadAsStringAsync(ct);
-            _logger.LogWarning("HubSpot batch upsert {StatusCode}: {Body}", (int)response.StatusCode, body);
+            _logger.LogDebug("HubSpot: {Count} contact(s) synced (withEmail={WithEmail})", contacts.Length, withEmail);
+            return [];
         }
-        else
-        {
-            _logger.LogDebug("HubSpot: {Count} contact(s) synced", contacts.Length);
-        }
+
+        var body = await response.Content.ReadAsStringAsync(ct);
+
+        // A VALIDATION_ERROR on the email property means the billing email is already
+        // assigned to a different HubSpot contact. Return these contacts for a retry
+        // without the email field so the remaining properties still sync.
+        if (withEmail && body.Contains("VALIDATION_ERROR") && body.Contains("\"email\""))
+            return contacts;
+
+        _logger.LogWarning("HubSpot batch upsert {StatusCode}: {Body}", (int)response.StatusCode, body);
+        return [];
     }
 
-    private static Dictionary<string, string?> BuildProperties(ContactSyncData c)
+    private static Dictionary<string, string?> BuildProperties(ContactSyncData c, bool includeEmail = true)
     {
         var props = new Dictionary<string, string?>();
 
         // billing_email → HubSpot "email" field (correspondence/outbound address)
-        if (c.BillingEmail != null)        props["email"] = c.BillingEmail;
+        if (includeEmail && c.BillingEmail != null) props["email"] = c.BillingEmail;
         if (c.LoginIdentity != null)       props["login_identity"] = c.LoginIdentity;
         if (c.DisplayName != null)         props["firstname"] = c.DisplayName;
         if (c.InternalUserId != null)      props["internal_customer_id"] = c.InternalUserId;
