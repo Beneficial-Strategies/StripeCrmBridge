@@ -16,4 +16,13 @@ public class HubSpotSettings
 
     /// <summary>HubSpot API base URL.</summary>
     public string BaseUrl { get; set; } = "https://api.hubapi.com";
+
+    /// <summary>
+    /// Which deployment environment this instance is running as — written to every synced
+    /// Contact's <c>environment</c> property (values: <c>"staging"</c> / <c>"production"</c>,
+    /// lowercased on write). Staging and production write to the same HubSpot portal as the
+    /// main MCP server (see that repo's docs/CRM.md "Environments") — this property is what
+    /// distinguishes a real customer record from a test one there.
+    /// </summary>
+    public string Environment { get; set; } = "production";
 }

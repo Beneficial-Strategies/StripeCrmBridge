@@ -11,7 +11,8 @@ namespace BeneficialStrategies.StripeCrmBridge.HubSpot;
 /// Contacts are keyed on <c>stripe_customer_id</c> — that property must be configured
 /// as a unique identifier in HubSpot (Settings → Properties → Contacts →
 /// stripe_customer_id → check "Used as a unique ID"). All other custom properties must
-/// also be defined before the first sync.
+/// also be defined before the first sync, including <c>environment</c> — see
+/// <see cref="HubSpotSettings.Environment"/>.
 /// </para>
 /// </summary>
 public sealed class HubSpotService : IHubSpotService
@@ -122,9 +123,12 @@ public sealed class HubSpotService : IHubSpotService
         return [];
     }
 
-    private static Dictionary<string, string?> BuildProperties(ContactSyncData c, bool includeEmail = true)
+    private Dictionary<string, string?> BuildProperties(ContactSyncData c, bool includeEmail = true)
     {
-        var props = new Dictionary<string, string?>();
+        var props = new Dictionary<string, string?>
+        {
+            ["environment"] = _settings.Environment.ToLowerInvariant(),
+        };
 
         // billing_email → HubSpot "email" field (correspondence/outbound address)
         if (includeEmail && c.BillingEmail != null) props["email"] = c.BillingEmail;
