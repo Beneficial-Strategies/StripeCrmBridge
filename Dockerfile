@@ -15,16 +15,22 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-COPY src/BeneficialStrategies.StripeCrmBridge/BeneficialStrategies.StripeCrmBridge.csproj BeneficialStrategies.StripeCrmBridge/
-
-RUN dotnet restore BeneficialStrategies.StripeCrmBridge/BeneficialStrategies.StripeCrmBridge.csproj
-
 COPY src/BeneficialStrategies.StripeCrmBridge/ BeneficialStrategies.StripeCrmBridge/
 
+# No separate `dotnet restore` layer + `--no-restore` here on purpose: this workflow's plain
+# `docker build .` (no --cache-from/--cache-to) gets no Docker layer cache across runs on
+# GitHub Actions' ephemeral runners anyway, so splitting restore into its own layer buys
+# nothing here. The split (with no packages.lock.json to make restore deterministic) is also
+# the prime suspect for a real CI failure (2026-09-12): NETSDK1064 on a transitive dependency,
+# Google.Api.CommonProtos 2.6.0, that was confirmed still present and downloadable on
+# NuGet.org's CDN throughout — i.e. not actually missing, exactly the kind of restore/publish
+# asset-file mismatch this pattern is known to produce. Couldn't force a local repro to
+# confirm that's the *whole* story rather than a one-off NuGet CDN hiccup, but a single
+# `dotnet publish` (which restores internally) verified clean in this same Linux image and
+# is the more robust default either way.
 RUN dotnet publish BeneficialStrategies.StripeCrmBridge/BeneficialStrategies.StripeCrmBridge.csproj \
     -c Release \
-    -o /app/publish \
-    --no-restore
+    -o /app/publish
 
 # Runtime stage
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine AS runtime
