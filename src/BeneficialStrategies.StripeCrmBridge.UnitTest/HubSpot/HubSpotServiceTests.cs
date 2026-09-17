@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using BeneficialStrategies.StripeCrmBridge.HubSpot;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -69,6 +70,60 @@ public class HubSpotServiceTests
         await sut.SyncContactAsync(MakeContact("cus_123"));
 
         Assert.Equal(1, calls);
+    }
+
+    // -------------------------------------------------------------------------
+    // staging email decoration — HubSpot's uniqueness is portal-wide, so a real
+    // address reused across staging test personas (or with its own production
+    // account) would otherwise collide
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public async Task SyncContactAsync_InStaging_DecoratesEmailWithStripeCustomerIdTag()
+    {
+        string? capturedBody = null;
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/batch/upsert"))
+            {
+                capturedBody = req.Content!.ReadAsStringAsync().Result;
+                return Json(HttpStatusCode.OK, "{}");
+            }
+            throw Unexpected(req);
+        });
+
+        var sut = CreateSut(handler, new HubSpotSettings { Enabled = true, AccessToken = "test-token", Environment = "staging" });
+
+        await sut.SyncContactAsync(MakeContact("cus_USr3b7NQ4Sxnzb", "beneficialstrategies@gmail.com"));
+
+        Assert.Equal("beneficialstrategies+stg-USr3b7NQ4Sxnzb@gmail.com", EmailFromUpsertBody(capturedBody));
+    }
+
+    [Fact]
+    public async Task SyncContactAsync_InProduction_NeverDecoratesEmail()
+    {
+        string? capturedBody = null;
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/batch/upsert"))
+            {
+                capturedBody = req.Content!.ReadAsStringAsync().Result;
+                return Json(HttpStatusCode.OK, "{}");
+            }
+            throw Unexpected(req);
+        });
+
+        var sut = CreateSut(handler, new HubSpotSettings { Enabled = true, AccessToken = "test-token", Environment = "production" });
+
+        await sut.SyncContactAsync(MakeContact("cus_VBMh8bNt7PsFzm", "skippy@possumshanks.com"));
+
+        Assert.Equal("skippy@possumshanks.com", EmailFromUpsertBody(capturedBody));
+    }
+
+    private static string? EmailFromUpsertBody(string? body)
+    {
+        using var doc = JsonDocument.Parse(body!);
+        return doc.RootElement.GetProperty("inputs")[0].GetProperty("properties").GetProperty("email").GetString();
     }
 
     // -------------------------------------------------------------------------

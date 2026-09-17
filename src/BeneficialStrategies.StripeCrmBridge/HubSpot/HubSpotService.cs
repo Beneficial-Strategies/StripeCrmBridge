@@ -313,6 +313,37 @@ public sealed class HubSpotService : IHubSpotService
         return props.TryGetProperty("stripe_customer_id", out var s) ? s.GetString() : null;
     }
 
+    /// <summary>
+    /// Staging syncs go to the SAME HubSpot portal as production, and HubSpot enforces email
+    /// uniqueness portal-wide — so any real address reused across multiple staging test
+    /// personas, or shared with its own production account, collides (see the main repo's
+    /// docs/CRM.md, "Email address separation"). Every staging contact's email gets a
+    /// <c>stripe_customer_id</c>-based tag appended before it's ever sent to HubSpot,
+    /// guaranteeing uniqueness by construction — never just a flat "+staging" tag, which would
+    /// still collide between two different staging personas that happen to share a real email.
+    /// The real address is preserved verbatim before the tag, so mail sent to it still reaches
+    /// a real inbox via the provider's own subaddressing/catch-all handling. Production emails
+    /// are never touched. Mirrors the main app's <c>HubSpotService.ResolveHubSpotEmail</c>
+    /// exactly — the two don't share code, so keep them in sync by hand if either changes.
+    /// </summary>
+    private string? ResolveHubSpotEmail(ContactSyncData c)
+    {
+        if (c.BillingEmail is null) return null;
+        if (!string.Equals(_settings.Environment, "staging", StringComparison.OrdinalIgnoreCase))
+            return c.BillingEmail;
+
+        var at = c.BillingEmail.IndexOf('@');
+        if (at <= 0) return c.BillingEmail; // not a well-formed email — leave it alone rather than guess
+
+        var localPart = c.BillingEmail[..at];
+        var domain = c.BillingEmail[at..]; // includes the "@"
+        var tag = c.StripeCustomerId.StartsWith("cus_", StringComparison.Ordinal)
+            ? c.StripeCustomerId["cus_".Length..]
+            : c.StripeCustomerId;
+
+        return $"{localPart}+stg-{tag}{domain}";
+    }
+
     private Dictionary<string, string?> BuildProperties(ContactSyncData c, bool includeEmail = true)
     {
         var props = new Dictionary<string, string?>
@@ -321,7 +352,8 @@ public sealed class HubSpotService : IHubSpotService
         };
 
         // billing_email → HubSpot "email" field (correspondence/outbound address)
-        if (includeEmail && c.BillingEmail != null) props["email"] = c.BillingEmail;
+        var billingEmail = ResolveHubSpotEmail(c);
+        if (includeEmail && billingEmail != null) props["email"] = billingEmail;
         if (c.LoginIdentity != null)       props["login_identity"] = c.LoginIdentity;
         if (c.DisplayName != null)         props["firstname"] = c.DisplayName;
         if (c.InternalUserId != null)      props["internal_customer_id"] = c.InternalUserId;
