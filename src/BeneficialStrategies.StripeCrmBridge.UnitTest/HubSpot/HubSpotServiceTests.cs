@@ -30,6 +30,11 @@ public class HubSpotServiceTests
             NullLogger<HubSpotService>.Instance);
     }
 
+    /// <summary>The lookup of a contact's names before a sync writes them (#65): a search with an IN filter.</summary>
+    private static bool IsNameLookup(HttpRequestMessage req) =>
+        req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/search") &&
+        req.Content!.ReadAsStringAsync().Result.Contains("\"IN\"", StringComparison.Ordinal);
+
     private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
         new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
 
@@ -57,6 +62,7 @@ public class HubSpotServiceTests
         var calls = 0;
         var handler = new FakeHttpMessageHandler(req =>
         {
+            if (IsNameLookup(req)) return Json(HttpStatusCode.OK, """{"results":[]}"""); // the name lookup of #65: no contact yet
             if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/batch/upsert"))
             {
                 calls++;
@@ -84,6 +90,7 @@ public class HubSpotServiceTests
         string? capturedBody = null;
         var handler = new FakeHttpMessageHandler(req =>
         {
+            if (IsNameLookup(req)) return Json(HttpStatusCode.OK, """{"results":[]}"""); // the name lookup of #65: no contact yet
             if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/batch/upsert"))
             {
                 capturedBody = req.Content!.ReadAsStringAsync().Result;
@@ -105,6 +112,7 @@ public class HubSpotServiceTests
         string? capturedBody = null;
         var handler = new FakeHttpMessageHandler(req =>
         {
+            if (IsNameLookup(req)) return Json(HttpStatusCode.OK, """{"results":[]}"""); // the name lookup of #65: no contact yet
             if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/batch/upsert"))
             {
                 capturedBody = req.Content!.ReadAsStringAsync().Result;
@@ -142,6 +150,7 @@ public class HubSpotServiceTests
         var merged = false;
         var handler = new FakeHttpMessageHandler(req =>
         {
+            if (IsNameLookup(req)) return Json(HttpStatusCode.OK, """{"results":[]}"""); // the name lookup of #65: no contact yet
             if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/batch/upsert"))
             {
                 upsertCalls++;
@@ -176,6 +185,7 @@ public class HubSpotServiceTests
         var withoutEmailAttempted = false;
         var handler = new FakeHttpMessageHandler(req =>
         {
+            if (IsNameLookup(req)) return Json(HttpStatusCode.OK, """{"results":[]}"""); // the name lookup of #65: no contact yet
             if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/batch/upsert"))
             {
                 var body = req.Content!.ReadAsStringAsync().Result;
@@ -212,6 +222,7 @@ public class HubSpotServiceTests
         var withoutEmailAttempted = false;
         var handler = new FakeHttpMessageHandler(req =>
         {
+            if (IsNameLookup(req)) return Json(HttpStatusCode.OK, """{"results":[]}"""); // the name lookup of #65: no contact yet
             if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/batch/upsert"))
             {
                 var body = req.Content!.ReadAsStringAsync().Result;
@@ -236,6 +247,7 @@ public class HubSpotServiceTests
         var upsertCalls = 0;
         var handler = new FakeHttpMessageHandler(req =>
         {
+            if (IsNameLookup(req)) return Json(HttpStatusCode.OK, """{"results":[]}"""); // the name lookup of #65: no contact yet
             if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/batch/upsert"))
             {
                 upsertCalls++;
@@ -249,6 +261,131 @@ public class HubSpotServiceTests
         await sut.SyncContactAsync(MakeContact("cus_new"));
 
         Assert.Equal(1, upsertCalls);
+    }
+
+    // -------------------------------------------------------------------------
+    // Names (#65): the display name seeds First Name and Last Name, never over a person's edit
+    // -------------------------------------------------------------------------
+
+    /// <summary>Answers the name lookup (a search by stripe_customer_id) and the upsert, and keeps the upsert body.</summary>
+    private sealed class NameSyncServer(string lookupResults, HttpStatusCode lookupStatus = HttpStatusCode.OK)
+    {
+        public List<string> Upserts { get; } = [];
+        public int Lookups { get; private set; }
+
+        public HttpResponseMessage Handle(HttpRequestMessage req)
+        {
+            var path = req.RequestUri!.AbsolutePath;
+            if (req.Method == HttpMethod.Post && path.EndsWith("/contacts/search"))
+            {
+                Lookups++;
+                return Json(lookupStatus, lookupResults);
+            }
+            if (req.Method == HttpMethod.Post && path.EndsWith("/contacts/batch/upsert"))
+            {
+                Upserts.Add(req.Content!.ReadAsStringAsync().Result);
+                return Json(HttpStatusCode.OK, "{}");
+            }
+            throw Unexpected(req);
+        }
+    }
+
+    private static JsonElement PropertiesOfFirstUpsert(NameSyncServer server)
+    {
+        var body = JsonDocument.Parse(Assert.Single(server.Upserts));
+        return body.RootElement.GetProperty("inputs")[0].GetProperty("properties").Clone();
+    }
+
+    [Fact]
+    public async Task Sync_NewContact_WritesTheDisplayNameSplitIntoBothNames()
+    {
+        var server = new NameSyncServer("""{"results":[]}""");
+        var sut = CreateSut(new FakeHttpMessageHandler(server.Handle));
+
+        await sut.SyncContactAsync(MakeContact("cus_new") with { DisplayName = "Nancy Ward" });
+
+        var props = PropertiesOfFirstUpsert(server);
+        Assert.Equal("Nancy", props.GetProperty("firstname").GetString());
+        Assert.Equal("Ward", props.GetProperty("lastname").GetString());
+    }
+
+    [Fact]
+    public async Task Sync_ContactWithBothNamesEmpty_WritesTheNames()
+    {
+        var server = new NameSyncServer("""{"results":[{"id":"1","properties":{"stripe_customer_id":"cus_1","firstname":null,"lastname":null}}]}""");
+        var sut = CreateSut(new FakeHttpMessageHandler(server.Handle));
+
+        await sut.SyncContactAsync(MakeContact("cus_1") with { DisplayName = "Mary Ann Smith" });
+
+        var props = PropertiesOfFirstUpsert(server);
+        Assert.Equal("Mary Ann", props.GetProperty("firstname").GetString());
+        Assert.Equal("Smith", props.GetProperty("lastname").GetString());
+    }
+
+    [Fact]
+    public async Task Sync_ReplayedCustomerCreated_ForAContactWhoseNamesWereCorrectedByHand_KeepsThemAndTheRestStillSyncs()
+    {
+        // Nancy Ward, split by hand on 2026-11-01; the customer.created event replayed on 2026-11-05 undid it (#65).
+        var server = new NameSyncServer("""{"results":[{"id":"1","properties":{"stripe_customer_id":"cus_1","firstname":"Nancy","lastname":"Ward"}}]}""");
+        var sut = CreateSut(new FakeHttpMessageHandler(server.Handle));
+
+        await sut.SyncContactAsync(MakeContact("cus_1") with { DisplayName = "Nancy Ward" });
+
+        var props = PropertiesOfFirstUpsert(server);
+        Assert.False(props.TryGetProperty("firstname", out _));
+        Assert.False(props.TryGetProperty("lastname", out _));
+        Assert.Equal("active", props.GetProperty("subscription_status").GetString());
+    }
+
+    [Theory]
+    [InlineData("Nancy", null)]
+    [InlineData(null, "Ward")]
+    public async Task Sync_ContactWithEitherNameSet_KeepsBoth(string? first, string? last)
+    {
+        var found = JsonSerializer.Serialize(new
+        {
+            results = new[] { new { id = "1", properties = new { stripe_customer_id = "cus_1", firstname = first, lastname = last } } }
+        });
+        var server = new NameSyncServer(found);
+        var sut = CreateSut(new FakeHttpMessageHandler(server.Handle));
+
+        await sut.SyncContactAsync(MakeContact("cus_1") with { DisplayName = "Someone Else" });
+
+        var props = PropertiesOfFirstUpsert(server);
+        Assert.False(props.TryGetProperty("firstname", out _));
+        Assert.False(props.TryGetProperty("lastname", out _));
+    }
+
+    [Fact]
+    public async Task Sync_WhenTheNameLookupFails_LeavesTheNamesAloneButStillSyncs()
+    {
+        var server = new NameSyncServer("{}", HttpStatusCode.InternalServerError);
+        var sut = CreateSut(new FakeHttpMessageHandler(server.Handle));
+
+        await sut.SyncContactAsync(MakeContact("cus_1") with { DisplayName = "Nancy Ward" });
+
+        var props = PropertiesOfFirstUpsert(server);
+        Assert.False(props.TryGetProperty("firstname", out _));
+        Assert.Equal("active", props.GetProperty("subscription_status").GetString());
+    }
+
+    [Fact]
+    public async Task BulkSync_ReadsTheNamesOfAWholeBatchInOneLookup()
+    {
+        var server = new NameSyncServer("""
+            {"results":[{"id":"1","properties":{"stripe_customer_id":"cus_a","firstname":"Hand","lastname":"Edited"}}]}
+            """);
+        var sut = CreateSut(new FakeHttpMessageHandler(server.Handle));
+
+        await sut.BulkSyncContactsAsync([
+            MakeContact("cus_a", "a@example.com") with { DisplayName = "Auto Name" },
+            MakeContact("cus_b", "b@example.com") with { DisplayName = "New Person" }]);
+
+        Assert.Equal(1, server.Lookups);
+        var inputs = JsonDocument.Parse(Assert.Single(server.Upserts)).RootElement.GetProperty("inputs");
+        Assert.False(inputs[0].GetProperty("properties").TryGetProperty("firstname", out _));   // cus_a keeps its names
+        Assert.Equal("New", inputs[1].GetProperty("properties").GetProperty("firstname").GetString());
+        Assert.Equal("Person", inputs[1].GetProperty("properties").GetProperty("lastname").GetString());
     }
 
     private sealed class FakeHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
