@@ -113,13 +113,14 @@ public sealed class HubSpotService : IHubSpotService
 
     private async Task<(ContactSyncData[] Failed, string? ErrorBody)> PostBatchAsync(ContactSyncData[] contacts, bool withEmail, CancellationToken ct)
     {
+        var existingNames = await ReadNamesAsync(contacts.Select(c => c.StripeCustomerId).ToArray(), ct);
         var payload = new
         {
             inputs = contacts.Select(c => new
             {
                 idProperty = "stripe_customer_id",
                 id = c.StripeCustomerId,
-                properties = BuildProperties(c, includeEmail: withEmail)
+                properties = BuildProperties(c, includeEmail: withEmail, writeNames: NamesMayBeWritten(existingNames, c.StripeCustomerId))
             })
         };
 
@@ -344,7 +345,62 @@ public sealed class HubSpotService : IHubSpotService
         return $"{localPart}+stg-{tag}{domain}";
     }
 
-    private Dictionary<string, string?> BuildProperties(ContactSyncData c, bool includeEmail = true)
+    /// <summary>
+    /// First Name and Last Name of the contacts that already exist in HubSpot, keyed by Stripe customer id; a contact
+    /// that is not in the result does not exist. Null when HubSpot could not be asked, so that the sync leaves the
+    /// names alone (#65). Mirrors the main app's <c>ReadNamesAsync</c>.
+    /// </summary>
+    private async Task<Dictionary<string, (string? First, string? Last)>?> ReadNamesAsync(string[] stripeCustomerIds, CancellationToken ct)
+    {
+        var wanted = stripeCustomerIds.Where(k => !string.IsNullOrEmpty(k)).Distinct().ToArray();
+        var found = new Dictionary<string, (string? First, string? Last)>();
+        if (wanted.Length == 0) return found;
+
+        var payload = new
+        {
+            filterGroups = new[]
+            {
+                new { filters = new[] { new { propertyName = "stripe_customer_id", @operator = "IN", values = wanted } } }
+            },
+            properties = new[] { "stripe_customer_id", "firstname", "lastname" },
+            limit = 100
+        };
+        using var content = new StringContent(JsonSerializer.Serialize(payload, JsonOptions), Encoding.UTF8, "application/json");
+
+        try
+        {
+            var response = await _http.PostAsync("crm/v3/objects/contacts/search", content, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("HubSpot name lookup {StatusCode}; the names are left alone in this sync", (int)response.StatusCode);
+                return null;
+            }
+
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            foreach (var result in doc.RootElement.GetProperty("results").EnumerateArray())
+            {
+                var props = result.GetProperty("properties");
+                string? Get(string name) => props.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+                var key = Get("stripe_customer_id");
+                if (key != null) found[key] = (Get("firstname"), Get("lastname"));
+            }
+            return found;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException)
+        {
+            _logger.LogWarning(ex, "HubSpot name lookup failed; the names are left alone in this sync");
+            return null;
+        }
+    }
+
+    private static bool NamesMayBeWritten(Dictionary<string, (string? First, string? Last)>? existing, string key)
+    {
+        var exists = existing != null && existing.TryGetValue(key, out _);
+        var names = exists ? existing![key] : default;
+        return ContactNames.MayWrite(existing != null, exists, names.First, names.Last);
+    }
+
+    private Dictionary<string, string?> BuildProperties(ContactSyncData c, bool includeEmail = true, bool writeNames = false)
     {
         var props = new Dictionary<string, string?>
         {
@@ -355,7 +411,11 @@ public sealed class HubSpotService : IHubSpotService
         var billingEmail = ResolveHubSpotEmail(c);
         if (includeEmail && billingEmail != null) props["email"] = billingEmail;
         if (c.LoginIdentity != null)       props["login_identity"] = c.LoginIdentity;
-        if (c.DisplayName != null)         props["firstname"] = c.DisplayName;
+        if (writeNames && ContactNames.Split(c.DisplayName) is var (first, last))
+        {
+            props["firstname"] = first;
+            if (last != null) props["lastname"] = last;
+        }
         if (c.InternalUserId != null)      props["internal_customer_id"] = c.InternalUserId;
         if (c.SubscriptionTier != null)    props["subscription_tier"] = c.SubscriptionTier.ToLowerInvariant();
         if (c.SubscriptionStatus != null)  props["subscription_status"] = c.SubscriptionStatus.ToLowerInvariant();

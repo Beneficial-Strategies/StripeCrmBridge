@@ -34,7 +34,7 @@ The following fields are upserted to the HubSpot Contacts API, keyed on `stripe_
 |---|---|---|
 | `stripe_customer_id` | Stripe Customer ID | **Contact identity key** — immutable |
 | `email` | Stripe Customer email | Correspondence address for outbound sequences |
-| `firstname` | Stripe Customer name | Display in CRM |
+| `firstname`, `lastname` | Stripe Customer name, split at its last word; written only while the contact has no name in HubSpot | Display in CRM |
 | `internal_customer_id` | Stripe Customer metadata | Link CRM record to app DB |
 | `subscription_tier` | Stripe Price metadata | Segment by plan |
 | `subscription_status` | Stripe Subscription status | Lifecycle stage |
