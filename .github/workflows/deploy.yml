@@ -1,8 +1,12 @@
 # CI/CD Pipeline for Stripe CRM Bridge
 #
 # Triggers:
-#   push to main     → build + deploy to STAGING  (stripe-crm-bridge-staging)
-#   push tag v*.*.*  → build + deploy to PRODUCTION (stripe-crm-bridge)
+#   pull request to main → the tests only (nothing is built, pushed or deployed)
+#   push to main         → the tests, then build + deploy to STAGING  (stripe-crm-bridge-staging)
+#   push tag v*.*.*      → the tests, then build + deploy to PRODUCTION (stripe-crm-bridge)
+#
+# After each deploy: /health must answer, and the webhook route must refuse a request with a bad
+# signature, and one with none, with 400 (a 404 or a 5xx fails the deploy: Iso20022MasterControl#66).
 #
 # Required GitHub secrets (repo-level):
 #   GCP_PROJECT_ID                  — GCP project ID ("iso20022-mcp-prod")
@@ -33,6 +37,8 @@
 name: Build and Deploy
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
@@ -43,15 +49,12 @@ env:
   IMAGE_NAME: stripe-crm-bridge
 
 jobs:
-  build-and-deploy:
-    name: Build, Test, Deploy
+  test:
+    name: Test
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
-      id-token: write
-
-    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
 
     steps:
       - name: Checkout
@@ -64,6 +67,22 @@ jobs:
 
       - name: Run tests
         run: dotnet test src/BeneficialStrategies.StripeCrmBridge.UnitTest
+
+  deploy:
+    name: Build and Deploy
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Authenticate to Google Cloud
         id: auth
@@ -138,6 +157,7 @@ jobs:
             --set-env-vars "HubSpot__Enabled=true,HubSpot__Environment=${{ steps.envvars.outputs.hubspot_environment }},DEPLOY_SHA=${{ github.sha }}"
 
       - name: Verify deployment
+        id: verify
         run: |
           SERVICE_URL=$(gcloud run services describe "${{ steps.envvars.outputs.service_name }}" \
             --region "${REGION}" \
@@ -145,6 +165,7 @@ jobs:
             --format "value(status.url)")
 
           echo "Service URL: ${SERVICE_URL}"
+          echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
 
           for i in $(seq 1 6); do
             if curl -sf "${SERVICE_URL}/health" > /dev/null 2>&1; then
@@ -157,3 +178,28 @@ jobs:
 
           echo "Health check failed after deployment"
           exit 1
+
+      # The route Stripe posts to must be there and must refuse what Stripe did not sign. A wrong path (404), a receiver that
+      # fails on a missing header (500) or one that does not start (5xx) would pass /health and break every webhook.
+      - name: Smoke test the webhook route
+        run: |
+          URL="${{ steps.verify.outputs.service_url }}/stripe/webhook"
+          fail=0
+
+          check() {
+            local what="$1"; shift
+            local status
+            status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST "$URL" -H 'Content-Type: application/json' "$@" -d '{}')
+            if [ "$status" = "400" ]; then
+              echo "OK   ${what}: ${status}"
+            else
+              echo "FAIL ${what}: expected 400, got ${status}"
+              fail=1
+            fi
+          }
+
+          check "bad signature"  -H 'Stripe-Signature: t=1,v1=not-a-signature'
+          check "no signature"
+          check "empty signature" -H 'Stripe-Signature: '
+
+          exit $fail
