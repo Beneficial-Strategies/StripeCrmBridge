@@ -56,7 +56,20 @@ public sealed class HubSpotService : IHubSpotService
     public async Task SyncContactAsync(ContactSyncData contact, CancellationToken ct = default)
     {
         if (!IsEnabled) return;
-        await BulkSyncContactsAsync([contact], ct);
+        var attempt = new SyncAttempt();
+        await UpsertOneAsync(contact, attempt, ct);
+        if (attempt.Failure is { } failure) throw failure;
+    }
+
+    /// <summary>
+    /// Collects the first failure of a sync that is not the email collision (that one has its own recovery). The webhook path
+    /// passes one and throws it; the batch sweep passes none and so, as before, logs the failure and carries on.
+    /// </summary>
+    private sealed class SyncAttempt
+    {
+        public HubSpotSyncException? Failure { get; private set; }
+
+        public void Record(HubSpotSyncException failure) => Failure ??= failure;
     }
 
     /// <inheritdoc/>
@@ -76,11 +89,11 @@ public sealed class HubSpotService : IHubSpotService
             // The only caller today (SyncContactAsync) always passes exactly one contact —
             // route through UpsertOneAsync so there's exactly one place that knows how to
             // recover from an email collision (merge or refuse), not just drop the field.
-            await UpsertOneAsync(contacts[0], ct);
+            await UpsertOneAsync(contacts[0], attempt: null, ct);
             return;
         }
 
-        var (failed, _) = await PostBatchAsync(contacts, withEmail: true, ct);
+        var (failed, _) = await PostBatchAsync(contacts, withEmail: true, attempt: null, ct);
         if (failed.Length == 0) return;
 
         // Ambiguous which contact(s) in a multi-contact batch caused the email-validation
@@ -92,15 +105,15 @@ public sealed class HubSpotService : IHubSpotService
             string.Join(", ", failed.Select(c => c.StripeCustomerId)));
 
         foreach (var contact in failed)
-            await UpsertOneAsync(contact, ct);
+            await UpsertOneAsync(contact, attempt: null, ct);
     }
 
-    private async Task UpsertOneAsync(ContactSyncData contact, CancellationToken ct)
+    private async Task UpsertOneAsync(ContactSyncData contact, SyncAttempt? attempt, CancellationToken ct)
     {
-        var (failed, errorBody) = await PostBatchAsync([contact], withEmail: true, ct);
+        var (failed, errorBody) = await PostBatchAsync([contact], withEmail: true, attempt, ct);
         if (failed.Length == 0) return;
 
-        if (errorBody != null && await TryResolveEmailCollisionAsync(contact, errorBody, ct))
+        if (errorBody != null && await TryResolveEmailCollisionAsync(contact, errorBody, attempt, ct))
             return;
 
         // Collision recovery didn't apply (couldn't identify the colliding contact, or it's a
@@ -108,10 +121,10 @@ public sealed class HubSpotService : IHubSpotService
         // email so the rest of the properties (tier, status, etc.) still land. The existing
         // email on the HubSpot contact is left unchanged.
         _logger.LogWarning("HubSpot email conflict for {CustomerId} — syncing without email field.", contact.StripeCustomerId);
-        await PostBatchAsync([contact], withEmail: false, ct);
+        await PostBatchAsync([contact], withEmail: false, attempt, ct);
     }
 
-    private async Task<(ContactSyncData[] Failed, string? ErrorBody)> PostBatchAsync(ContactSyncData[] contacts, bool withEmail, CancellationToken ct)
+    private async Task<(ContactSyncData[] Failed, string? ErrorBody)> PostBatchAsync(ContactSyncData[] contacts, bool withEmail, SyncAttempt? attempt, CancellationToken ct)
     {
         var existingNames = await ReadNamesAsync(contacts.Select(c => c.StripeCustomerId).ToArray(), ct);
         var payload = new
@@ -135,6 +148,7 @@ public sealed class HubSpotService : IHubSpotService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "HubSpot API unreachable");
+            attempt?.Record(new HubSpotSyncException("HubSpot could not be reached: " + ex.Message, retryable: true, statusCode: null));
             return ([], null);
         }
 
@@ -155,7 +169,16 @@ public sealed class HubSpotService : IHubSpotService
             return (contacts, body);
 
         _logger.LogWarning("HubSpot batch upsert {StatusCode}: {Body}", (int)response.StatusCode, body);
+        attempt?.Record(FailureOf(response));
         return ([], null);
+    }
+
+    // Retrying the same event can succeed when HubSpot was busy or down (408, 429, 5xx); anything else it refused.
+    private static HubSpotSyncException FailureOf(HttpResponseMessage response)
+    {
+        var status = (int)response.StatusCode;
+        var retryable = status is 408 or 429 or >= 500;
+        return new HubSpotSyncException($"HubSpot answered {status}", retryable, status, response.Headers.RetryAfter?.Delta);
     }
 
     private static bool LooksLikeEmailCollision(string body) =>
@@ -188,7 +211,7 @@ public sealed class HubSpotService : IHubSpotService
     /// True if the collision was resolved and a retried sync was attempted; false if recovery
     /// didn't apply and the caller should fall back to its own handling.
     /// </returns>
-    private async Task<bool> TryResolveEmailCollisionAsync(ContactSyncData contact, string upsertErrorBody, CancellationToken ct)
+    private async Task<bool> TryResolveEmailCollisionAsync(ContactSyncData contact, string upsertErrorBody, SyncAttempt? attempt, CancellationToken ct)
     {
         var otherContactId = ExtractCollidingContactId(upsertErrorBody);
         if (otherContactId is null) return false;
@@ -248,7 +271,7 @@ public sealed class HubSpotService : IHubSpotService
             "{SurvivorId} for {CustomerId}. Retrying the property sync.",
             otherContactId, survivorId, contact.StripeCustomerId);
 
-        var (retryFailed, _) = await PostBatchAsync([contact], withEmail: true, ct);
+        var (retryFailed, _) = await PostBatchAsync([contact], withEmail: true, attempt, ct);
         if (retryFailed.Length > 0)
             _logger.LogWarning("HubSpot retry-after-merge still failed for {CustomerId}.", contact.StripeCustomerId);
 

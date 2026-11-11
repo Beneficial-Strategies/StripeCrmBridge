@@ -24,7 +24,6 @@ public class CrmWebhookProcessor(
 {
     public async Task ProcessAsync(Event stripeEvent)
     {
-        logger.LogDebug("CRM processing event: {EventType}", stripeEvent.Type);
 
         switch (stripeEvent.Type)
         {
@@ -56,7 +55,7 @@ public class CrmWebhookProcessor(
                 await HandleCustomerUpdated(stripeEvent);
                 break;
             default:
-                logger.LogDebug("CRM ignoring event: {EventType}", stripeEvent.Type);
+                logger.LogInformation("CRM ignored event: {EventType}", stripeEvent.Type);
                 break;
         }
     }
@@ -289,16 +288,14 @@ public class CrmWebhookProcessor(
 
     // ── Helpers ─────────────────────────────────────────────────────────────────
 
+    // A failed sync is not swallowed: HubSpotSyncException reaches the controller, which answers Stripe with an error so the event is delivered again.
     private async Task SyncAsync(ContactSyncData contact)
     {
-        try
-        {
-            await hubSpot.SyncContactAsync(contact);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "HubSpot sync failed for {StripeCustomerId}", contact.StripeCustomerId);
-        }
+        await hubSpot.SyncContactAsync(contact);
+        if (hubSpot.IsEnabled)
+            logger.LogInformation("HubSpot contact synced for {StripeCustomerId}", contact.StripeCustomerId);
+        else
+            logger.LogInformation("HubSpot sync is off; nothing sent for {StripeCustomerId}", contact.StripeCustomerId);
     }
 
     private async Task<string?> GetCustomerEmailAsync(string customerId)

@@ -48,11 +48,28 @@ CrmWebhookProcessor.ProcessAsync()
 
 ## Failure behavior
 
-- **HubSpot unreachable:** 10-second timeout, exception caught and logged. Stripe receives
-  200 OK. The contact will be corrected on the next event or the nightly sweep.
-- **Stripe signature invalid:** 400 returned. Stripe will not retry invalid-signature responses.
-- **Stripe Customer fetch fails:** Event is skipped with a warning log. No retry.
-- **HubSpot non-2xx response:** Logged as warning. Stripe receives 200 OK (no retry triggered).
+Stripe treats every non-2xx answer as a failed delivery and delivers the event again (live mode: with growing intervals for up to
+three days), and shows the status and the body of each attempt on its dashboard. So an event whose work did not land is never
+answered 200. The sync is an upsert keyed on the Stripe customer ID, so a delivery that is repeated is safe; a late repeat can apply
+older state after a newer event, which the nightly sweep corrects.
+
+- **HubSpot unreachable, timeout (10 seconds), 408, 429 or 5xx:** **503** with a `Retry-After` header (HubSpot's own on a 429, else
+  60 seconds) and the body `{"error":"hubspot_sync_failed","retryable":true,"hubspotStatus":...}`. A repeat can succeed as it is.
+- **HubSpot refused the request (400, 401, 403, 404 and the like):** **502** with the same body and `"retryable":false`. A repeat
+  cannot succeed until someone looks (a revoked token, a property that is not defined, bad data); a delivery after the fix lands it.
+  An email that belongs to another contact is not this case: it is recovered (merged, or synced without the email) and logged.
+- **Any other failure while handling the event:** 500.
+- **Every one of these** is logged at Error with the event ID, the HubSpot status and whether a repeat can cure it
+  (`HubSpot sync failed: {EventType} ({EventId}) status=... retryable=...`).
+- **HubSpot switched off** (`HubSpot:Enabled` false): nothing is sent, the log says so, and Stripe receives 200.
+- **Stripe signature missing or invalid:** 400. Stripe delivers it again, which fails the same way: only a wrong webhook secret
+  makes this happen to a real event.
+- **Stripe Customer fetch fails:** warning logged; the sync goes on without the email (the contact is keyed on the customer ID).
+- **Event type nobody handles:** `ignored` at Information, with the event ID; Stripe receives 200.
+- **The nightly sweep** (many contacts at once) does not use these answers: a failure is logged and the sweep carries on.
+
+Every line written while an event is handled carries its ID (`StripeEventId`, `StripeEventType` in the scope), and the logs
+hold IDs only: no email address or name.
 
 ## Nightly reconciliation
 

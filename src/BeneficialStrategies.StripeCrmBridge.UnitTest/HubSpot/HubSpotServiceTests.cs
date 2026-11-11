@@ -258,9 +258,84 @@ public class HubSpotServiceTests
 
         var sut = CreateSut(handler);
 
-        await sut.SyncContactAsync(MakeContact("cus_new"));
+        var failure = await Assert.ThrowsAsync<HubSpotSyncException>(() => sut.SyncContactAsync(MakeContact("cus_new")));
 
         Assert.Equal(1, upsertCalls);
+        Assert.False(failure.Retryable);        // HubSpot refused the data: a repeat of the same event cannot succeed
+        Assert.Equal(400, failure.StatusCode);
+    }
+
+    // -------------------------------------------------------------------------
+    // A failure of the webhook's sync is reported, never swallowed (Iso20022MasterControl#66); the sweep still carries on
+    // -------------------------------------------------------------------------
+
+    private static FakeHttpMessageHandler UpsertAnswers(Func<HttpResponseMessage> upsert) => new(req =>
+    {
+        if (IsNameLookup(req)) return Json(HttpStatusCode.OK, """{"results":[]}""");
+        if (req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/contacts/batch/upsert")) return upsert();
+        throw Unexpected(req);
+    });
+
+    [Theory]
+    [InlineData(HttpStatusCode.ServiceUnavailable, true)]
+    [InlineData(HttpStatusCode.InternalServerError, true)]
+    [InlineData(HttpStatusCode.BadGateway, true)]
+    [InlineData(HttpStatusCode.RequestTimeout, true)]
+    [InlineData(HttpStatusCode.TooManyRequests, true)]
+    [InlineData(HttpStatusCode.Unauthorized, false)]
+    [InlineData(HttpStatusCode.Forbidden, false)]
+    [InlineData(HttpStatusCode.NotFound, false)]
+    [InlineData(HttpStatusCode.BadRequest, false)]
+    public async Task SyncContactAsync_WhenHubSpotAnswersWithAnError_Throws_AndSaysWhetherARepeatCanSucceed(HttpStatusCode status, bool retryable)
+    {
+        var sut = CreateSut(UpsertAnswers(() => Json(status, "{}")));
+
+        var failure = await Assert.ThrowsAsync<HubSpotSyncException>(() => sut.SyncContactAsync(MakeContact("cus_1")));
+
+        Assert.Equal(retryable, failure.Retryable);
+        Assert.Equal((int)status, failure.StatusCode);
+    }
+
+    [Fact]
+    public async Task SyncContactAsync_WhenHubSpotAsksForTime_CarriesItsRetryAfter()
+    {
+        var sut = CreateSut(UpsertAnswers(() =>
+        {
+            var response = Json(HttpStatusCode.TooManyRequests, "{}");
+            response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(7));
+            return response;
+        }));
+
+        var failure = await Assert.ThrowsAsync<HubSpotSyncException>(() => sut.SyncContactAsync(MakeContact("cus_1")));
+
+        Assert.Equal(TimeSpan.FromSeconds(7), failure.RetryAfter);
+    }
+
+    [Fact]
+    public async Task SyncContactAsync_WhenHubSpotCannotBeReached_Throws_AsSomethingARepeatCanCure()
+    {
+        var sut = CreateSut(UpsertAnswers(() => throw new HttpRequestException("connection refused")));
+
+        var failure = await Assert.ThrowsAsync<HubSpotSyncException>(() => sut.SyncContactAsync(MakeContact("cus_1")));
+
+        Assert.True(failure.Retryable);
+        Assert.Null(failure.StatusCode);
+    }
+
+    [Fact]
+    public async Task SyncContactAsync_WhenTheSyncLands_DoesNotThrow() =>
+        await CreateSut(UpsertAnswers(() => Json(HttpStatusCode.OK, "{}"))).SyncContactAsync(MakeContact("cus_1"));
+
+    [Fact]
+    public async Task SyncContactAsync_WhenHubSpotIsSwitchedOff_DoesNothingAndDoesNotThrow() =>
+        await CreateSut(UpsertAnswers(() => throw Unexpected(new HttpRequestMessage())), new HubSpotSettings { Enabled = false }).SyncContactAsync(MakeContact("cus_1"));
+
+    [Fact]
+    public async Task BulkSync_WhenHubSpotAnswersWithAnError_LogsAndCarriesOn_AsTheSweepAlwaysDid()
+    {
+        var sut = CreateSut(UpsertAnswers(() => Json(HttpStatusCode.ServiceUnavailable, "{}")));
+
+        await sut.BulkSyncContactsAsync([MakeContact("cus_1"), MakeContact("cus_2", "b@example.com")]);
     }
 
     // -------------------------------------------------------------------------
