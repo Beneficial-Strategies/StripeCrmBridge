@@ -17,8 +17,15 @@ public class StripeWebhookController(
     [HttpPost("/stripe/webhook")]
     public async Task<IActionResult> HandleWebhook()
     {
-        var json = await new StreamReader(Request.Body).ReadToEndAsync();
+        // A request without a signature is refused before anything else: the Stripe library throws ArgumentNullException, not StripeException, for a missing one.
         var signature = Request.Headers["Stripe-Signature"].FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(signature))
+        {
+            logger.LogWarning("Stripe webhook refused: no Stripe-Signature header");
+            return BadRequest("Invalid signature");
+        }
+
+        var json = await new StreamReader(Request.Body).ReadToEndAsync();
         var secret = config["Stripe:WebhookSecret"];
 
         if (string.IsNullOrEmpty(secret))
