@@ -12,11 +12,26 @@ Stripe
 │   Purpose: Update application database (user tiers, subscription status)
 │   Code: Iso20022MasterControl / StripeWebhookProcessor.cs
 │
-└── Destination 2: https://stripe-crm-bridge-<hash>.run.app/stripe/webhook
+└── Destination 2: https://stripe-crm-bridge-260667003376.us-central1.run.app/stripe/webhook
     Events: checkout.session.completed, customer.subscription.*, invoice.*, customer.updated
     Purpose: Update HubSpot CRM contacts
     Code: StripeCrmBridge / CrmWebhookProcessor.cs (this repo)
 ```
+
+The destination is the **Cloud Run service URL plus the path `/stripe/webhook`**, and nothing else (a destination that ends in
+`/webhook` reaches no route and Stripe's deliveries fail with 404: this happened on 2026-11-05). The services:
+
+| Environment | Cloud Run service | Stripe mode | Service URL |
+|---|---|---|---|
+| Production | `stripe-crm-bridge` | live | `https://stripe-crm-bridge-260667003376.us-central1.run.app` |
+| Staging | `stripe-crm-bridge-staging` | test | `https://stripe-crm-bridge-staging-260667003376.us-central1.run.app` |
+
+Cloud Run also answers on a second form of each address (`https://<service>-2qfqooejfq-uc.a.run.app`, the `status.url` the deploy
+reads); both reach the same service. The destination registered in the Stripe Dashboard may use either, so compare it with the
+table before changing anything. **Renaming a Cloud Run service changes its URL and so the Stripe
+destination:** change the destination in the Stripe Dashboard in the same step (StripeCrmBridge#1 and #2). Every deploy checks that
+this route answers: it posts a request with a bad signature, one with none and one with an empty one, and each must get 400
+(`.github/workflows/deploy.yml`, "Smoke test the webhook route").
 
 ## Contact upsert flow
 
